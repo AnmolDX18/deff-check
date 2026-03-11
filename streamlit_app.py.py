@@ -1,51 +1,43 @@
 import streamlit as st
 import requests
 import pandas as pd
-import time
-import json
-import os
 import re
+import time
 
 API_KEY = "SPDdJ_kP7zKiKjX806J_CQ"
 
-#webhook_url = "https://unmutative-alvera-unmineralised.ngrok-free.dev/apollo_webhook"
+MATCH_URL = "https://api.apollo.io/api/v1/people/match"
+REVEAL_URL = "https://api.apollo.io/api/v1/people/reveal"
 
-RESULT_FILE = "webhook_results.json"
+headers = {
+    "Content-Type": "application/json",
+    "x-api-key": API_KEY
+}
 
-st.set_page_config(page_title="Apollo LinkedIn Enrichment", layout="wide")
+st.set_page_config(page_title="Apollo Enrichment", layout="wide")
 
-st.title("Apollo LinkedIn Bulk Enrichment Tool")
+st.title("Apollo LinkedIn Enrichment Tool")
 
 linkedin_input = st.text_area(
-    "Paste LinkedIn URLs (one per line)",
+    "Paste LinkedIn URLs",
     height=200
 )
 
-process = st.button("Start Enrichment")
+start = st.button("Match Profiles")
 
 
 def is_valid(url):
-    pattern = r"^https:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9\-_%]+\/?$"
+    pattern = r"^https:\/\/(www\.)?linkedin\.com\/in\/"
     return re.match(pattern, url)
 
 
-def call_apollo(linkedin):
-
-    url = "https://api.apollo.io/api/v1/people/match"
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": API_KEY
-    }
+def match_person(linkedin):
 
     payload = {
-    "linkedin_url": linkedin,
-    "reveal_phone_number": True,
-    "reveal_personal_emails": True,
-    "webhook_url": "https://unmutative-alvera-unmineralised.ngrok-free.dev/apollo_webhook"
-}
+        "linkedin_url": linkedin
+    }
 
-    r = requests.post(url, headers=headers, json=payload)
+    r = requests.post(MATCH_URL, headers=headers, json=payload)
 
     if r.status_code == 200:
         return r.json()
@@ -53,18 +45,32 @@ def call_apollo(linkedin):
     return None
 
 
-def load_webhook_data():
+def reveal_phone(person_id):
 
-    if not os.path.exists(RESULT_FILE):
-        return {}
+    payload = {
+        "id": person_id,
+        "reveal_phone_number": True
+    }
 
-    with open(RESULT_FILE) as f:
-        data = json.load(f)
+    r = requests.post(REVEAL_URL, headers=headers, json=payload)
 
-    return {d["person_id"]: d["phone"] for d in data}
+    if r.status_code == 200:
+
+        data = r.json()
+
+        phones = data.get("person", {}).get("phone_numbers", [])
+
+        if phones:
+            return phones[0].get("sanitized_number")
+
+    return None
 
 
-if process:
+# --------------------
+# MATCH PROFILES
+# --------------------
+
+if start:
 
     urls = [u.strip() for u in linkedin_input.split("\n") if u.strip()]
 
@@ -77,53 +83,60 @@ if process:
         if not is_valid(url):
             continue
 
-        data = call_apollo(url)
+        data = match_person(url)
 
         if data and "person" in data:
 
-            person = data["person"]
+            p = data["person"]
 
             results.append({
-                "person_id": person.get("id"),
+                "person_id": p.get("id"),
                 "LinkedIn": url,
-                "Name": person.get("name"),
-                "Title": person.get("title"),
-                "Company": person.get("organization", {}).get("name"),
-                "Email": person.get("email"),
-                "Phone": "Waiting..."
+                "Name": p.get("name"),
+                "Title": p.get("title"),
+                "Company": p.get("organization", {}).get("name"),
+                "Email": p.get("email"),
+                "Phone": ""
             })
 
-        progress.progress((i+1)/len(urls))
+        progress.progress((i + 1) / len(urls))
 
-        time.sleep(1)
+        time.sleep(0.7)
 
     df = pd.DataFrame(results)
 
     st.session_state["df"] = df
 
-    st.success("Apollo enrichment started")
 
-    st.dataframe(df)
+# --------------------
+# SHOW TABLE
+# --------------------
 
+if "df" in st.session_state:
 
-if st.button("Refresh Phone Numbers"):
+    df = st.session_state["df"]
 
-    if "df" not in st.session_state:
-        st.warning("Run enrichment first")
-    else:
+    for i, row in df.iterrows():
 
-        df = st.session_state["df"]
+        col1, col2, col3, col4, col5 = st.columns([3,2,2,2,1])
 
-        phones = load_webhook_data()
+        col1.write(row["Name"])
+        col2.write(row["Company"])
+        col3.write(row["Email"])
+        col4.write(row["Phone"])
 
-        df["Phone"] = df["person_id"].map(phones).fillna("Waiting...")
+        if col5.button("Reveal Phone", key=i):
 
-        st.dataframe(df)
+            phone = reveal_phone(row["person_id"])
 
-        csv = df.to_csv(index=False).encode()
+            df.loc[i, "Phone"] = phone
 
-        st.download_button(
-            "Download CSV",
-            csv,
-            "apollo_results.csv"
-        )
+            st.session_state["df"] = df
+
+            st.rerun()
+
+    st.download_button(
+        "Download CSV",
+        df.to_csv(index=False).encode(),
+        "apollo_results.csv"
+    )
